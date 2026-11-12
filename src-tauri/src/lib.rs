@@ -308,6 +308,83 @@ fn anchor_top_center(win: &WebviewWindow) {
 /// Windows keeps one z-order band for all "topmost" windows, so launchers/docks
 /// (MyDockFinder, etc.) can end up above us. Re-assert HWND_TOPMOST periodically
 /// to stay at the top of that band without stealing focus.
+/// Keeps the notch out of the taskbar (and out of dock-style launchers that list taskbar windows): a tool window, never an
+/// app window. WS_EX_APPWINDOW gets set again by activation calls, so this is re-checked from the housekeeping loop.
+#[cfg(windows)]
+fn hide_from_taskbar(win: &WebviewWindow) {
+    hide_stray_windows(win);
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, GetWindow, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_HWNDPARENT, GW_OWNER, WS_POPUP, GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    };
+    let Ok(hwnd) = win.hwnd() else { return };
+    let h = hwnd.0 as _;
+    unsafe {
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        let want = (ex | WS_EX_TOOLWINDOW as isize) & !(WS_EX_APPWINDOW as isize);
+        // Docks / taskbars that list "top-level windows with no owner" (e.g. MyDockFinder, Process.MainWindowHandle) skip windows
+        // that have an owner, so give the notch a hidden owner (the same trick WPF uses for ShowInTaskbar=false).
+        let has_owner = !GetWindow(h, GW_OWNER).is_null();
+        if !has_owner {
+            let owner = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                [83u16, 84, 65, 84, 73, 67, 0].as_ptr(), // "STATIC"
+                [0u16].as_ptr(),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
+            if !owner.is_null() {
+                SetWindowLongPtrW(h, GWLP_HWNDPARENT, owner as isize);
+            }
+        }
+        if ex == want {
+            return;
+        }
+        let visible = win.is_visible().unwrap_or(false);
+        if visible {
+            ShowWindow(h, SW_HIDE); // the taskbar only re-reads the style across a hide/show
+        }
+        SetWindowLongPtrW(h, GWL_EXSTYLE, want);
+        SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        if visible {
+            ShowWindow(h, SW_SHOWNA);
+        }
+    }
+}
+/// Other visible top-level windows of this process (e.g. the single-instance helper window) would make dock launchers list the app,
+/// so anything visible besides the notch itself is hidden.
+#[cfg(windows)]
+fn hide_stray_windows(win: &WebviewWindow) {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible, ShowWindow, SW_HIDE};
+    unsafe extern "system" fn each(h: HWND, keep: LPARAM) -> i32 {
+        unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(h, &mut pid);
+            if pid == GetCurrentProcessId() && h as isize != keep && IsWindowVisible(h) != 0 {
+                ShowWindow(h, SW_HIDE);
+            }
+        }
+        1
+    }
+    if let Ok(hwnd) = win.hwnd() {
+        unsafe {
+            EnumWindows(Some(each), hwnd.0 as isize);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn hide_from_taskbar(_win: &WebviewWindow) {}
+
 #[cfg(windows)]
 fn raise_topmost(win: &WebviewWindow) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -460,6 +537,9 @@ fn spawn_window_loop(win: WebviewWindow) {
             }
             if tick % 6 == 0 {
                 raise_topmost(&win);
+            }
+            if tick % 30 == 0 {
+                hide_from_taskbar(&win);
             }
             if tick % 4 == 0 {
                 desktop = desktop_in_front(hwnd);
@@ -701,6 +781,7 @@ pub fn run() {
             pin_window(&win);
             win.set_ignore_cursor_events(true)?;
             exclude_from_capture(&win);
+            hide_from_taskbar(&win);
             app.manage(reminders::open(app.handle())?);
             reminders::spawn_scheduler(app.handle().clone());
             pomodoro::spawn_ticker(app.handle().clone());
