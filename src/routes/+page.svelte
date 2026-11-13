@@ -615,14 +615,14 @@
   <svg class="shape" class:voice={fadeOn} width={WIN_W} height={WIN_H} viewBox="0 0 {WIN_W} {WIN_H}" aria-hidden="true" style="transform:translateY({box.y}px)">
     <defs>
       <!-- userSpaceOnUse so the fade always spans the notch's current height: solid black at the top edge, clearing toward the bottom -->
-      <linearGradient id="voiceFade" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2={Math.max(box.h, 40)}>
+      <linearGradient id="voiceFade" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="0" y2={Math.max(box.h, box.h2, 40)}>
         <stop offset="0" stop-color="#000" stop-opacity="1" />
         <stop offset="0.75" stop-color="#000" stop-opacity="1" />
-        <stop offset="1" stop-color="#000" stop-opacity="0.03" />
+        <stop class="fadeEnd" class:on={fadeOn} offset="1" stop-color="#000" />
       </linearGradient>
     </defs>
-    <path {d} fill="#000" class="solid" class:off={fadeOn} />
-    <path {d} fill="url(#voiceFade)" class="fade" class:on={fadeOn} />
+    <!-- One layer: the gradient's last stop animates from solid black to see-through, so there is never a half-transparent crossfade dip -->
+    <path {d} fill="url(#voiceFade)" />
   </svg>
 
   <!-- Everything interactive is clipped to the exact same path, so content can never poke out of the liquid edge. -->
@@ -787,39 +787,12 @@
     position: fixed;
     inset: 0;
   }
-  .shape .solid,
-  .shape .fade {
-    transition: opacity 420ms ease;
+  .shape .fadeEnd {
+    stop-opacity: 1;
+    transition: stop-opacity 420ms ease;
   }
-  .backdrop {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 1000px;
-    height: 520px;
-    overflow: hidden;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity 420ms ease;
-    will-change: transform;
-  }
-  .backdrop.on {
-    opacity: 1;
-  }
-  .backdrop canvas {
-    position: absolute;
-    display: block;
-    filter: blur(2px);
-    image-rendering: auto;
-  }
-  .shape .solid.off {
-    opacity: 0;
-  }
-  .shape .fade {
-    opacity: 0;
-  }
-  .shape .fade.on {
-    opacity: 1;
+  .shape .fadeEnd.on {
+    stop-opacity: 0.03;
   }
   .shape {
     position: absolute;
