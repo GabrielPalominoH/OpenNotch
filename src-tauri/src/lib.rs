@@ -259,6 +259,7 @@ fn exclude_from_capture(_win: &WebviewWindow) {}
 fn focus_window(win: WebviewWindow) {
     let _ = win.set_focus();
     force_foreground(&win);
+    hide_from_taskbar(&win); // activation re-adds WS_EX_APPWINDOW
 }
 
 /// Windows refuses focus to background apps; attaching to the foreground thread's input queue lets us take it.
@@ -314,8 +315,7 @@ fn anchor_top_center(win: &WebviewWindow) {
 fn hide_from_taskbar(win: &WebviewWindow) {
     hide_stray_windows(win);
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, GetWindow, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_HWNDPARENT, GW_OWNER, WS_POPUP, GWL_EXSTYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        CreateWindowExW, GetWindow, GetWindowLongPtrW, SetWindowLongPtrW, GWLP_HWNDPARENT, GW_OWNER, WS_POPUP, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
     let Ok(hwnd) = win.hwnd() else { return };
     let h = hwnd.0 as _;
@@ -347,15 +347,8 @@ fn hide_from_taskbar(win: &WebviewWindow) {
         if ex == want {
             return;
         }
-        let visible = win.is_visible().unwrap_or(false);
-        if visible {
-            ShowWindow(h, SW_HIDE); // the taskbar only re-reads the style across a hide/show
-        }
+        // Style change only: no hide/show - that is what made the notch blink each time focusing re-armed WS_EX_APPWINDOW.
         SetWindowLongPtrW(h, GWL_EXSTYLE, want);
-        SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-        if visible {
-            ShowWindow(h, SW_SHOWNA);
-        }
     }
 }
 /// Other visible top-level windows of this process (e.g. the single-instance helper window) would make dock launchers list the app,
@@ -384,6 +377,28 @@ fn hide_stray_windows(win: &WebviewWindow) {
 
 #[cfg(not(windows))]
 fn hide_from_taskbar(_win: &WebviewWindow) {}
+
+/// True when a visible, topmost window sits above ours in the z-order.
+#[cfg(windows)]
+fn covered_by_topmost(own: isize) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindow, GetWindowLongPtrW, IsWindowVisible, GWL_EXSTYLE, GW_HWNDPREV, WS_EX_TOPMOST};
+    unsafe {
+        let mut h = GetWindow(own as _, GW_HWNDPREV);
+        let mut guard = 0;
+        while !h.is_null() && guard < 64 {
+            if IsWindowVisible(h) != 0 && GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOPMOST as isize != 0 {
+                return true;
+            }
+            h = GetWindow(h, GW_HWNDPREV);
+            guard += 1;
+        }
+        false
+    }
+}
+#[cfg(not(windows))]
+fn covered_by_topmost(_own: isize) -> bool {
+    false
+}
 
 #[cfg(windows)]
 fn raise_topmost(win: &WebviewWindow) {
@@ -419,6 +434,9 @@ fn set_visible(win: &WebviewWindow, visible: bool) {
     if let Ok(hwnd) = win.hwnd() {
         unsafe {
             ShowWindow(hwnd.0 as _, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
+        }
+        if visible {
+            hide_from_taskbar(win); // each show can re-arm the taskbar button: strip it right away
         }
     }
 }
@@ -535,10 +553,12 @@ fn spawn_window_loop(win: WebviewWindow) {
             if hidden {
                 continue;
             }
-            if tick % 6 == 0 {
+            // Something topmost (a dock, its menu bar) got above us: climb back at once (checked every tick, so the dip lasts
+            // ~16 ms instead of up to 100 ms, which was the "vibration"); an extra raise every ~1 s as a safety net.
+            if covered_by_topmost(hwnd) || tick % 60 == 0 {
                 raise_topmost(&win);
             }
-            if tick % 30 == 0 {
+            if tick % 15 == 0 {
                 hide_from_taskbar(&win);
             }
             if tick % 4 == 0 {
